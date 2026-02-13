@@ -51,6 +51,12 @@ sudo -u "$REAL_USER" bash -c "
     ~/.local/bin/mise use -g node@22
     ~/.local/bin/mise use -g python@3.12
     ~/.local/bin/mise use -g go@latest
+    ~/.local/bin/mise use -g bun@latest
+    
+    # Using Mise to manage global node dependencies (Cleaner than npm -g)
+    ~/.local/bin/mise use -g npm:pnpm
+    ~/.local/bin/mise use -g npm:typescript
+    ~/.local/bin/mise use -g npm:rimraf
 "
 
 # 6. AUR SOFTWARE
@@ -93,21 +99,30 @@ alias l="ls -lah --color=auto"
 alias cat="bat"
 # Map tldr to tealdeer so you don't notice the difference
 alias tldr="tealdeer"
+alias b="bun"
+alias bx="bunx"
 EOF
 chown "$REAL_USER":"$REAL_USER" "$USER_HOME/.config/fish/conf.d/predator_dev.fish"
 
-# 10. ENABLE SERVICES (With fix for empty unit name)
+# 10. ENABLE SERVICES (With fix for linked/masked units and empty names)
 status "Activating System Services..."
 systemctl daemon-reload
 
-systemctl enable --now postgresql redis mariadb podman
+# Fix for "Refusing to operate on linked unit file"
+# This forces systemd to reset the symlinks for these specific services
+for svc in postgresql redis mariadb podman; do
+    status "Resetting and starting $svc..."
+    systemctl unmask "$svc" 2>/dev/null || true
+    systemctl reenable --now "$svc" 2>/dev/null || true
+done
 
 # Safe MongoDB enablement
 MONGO_FOUND=$(systemctl list-unit-files | grep -E "^mongo(d|db).service" | head -n1 | awk '{print $1}')
 if [ -n "$MONGO_FOUND" ]; then
+    systemctl unmask "$MONGO_FOUND" 2>/dev/null || true
     systemctl enable --now "$MONGO_FOUND"
 else
-    status "MongoDB service not found yet (AUR build might have failed). Run 'paru -S mongodb-bin' manually later."
+    status "MongoDB service not found yet. Run 'paru -S mongodb-bin' manually later."
 fi
 
 status "DEV ENVIRONMENT READY! PLEASE REBOOT."

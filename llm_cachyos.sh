@@ -1,45 +1,95 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# PREDATOR LOCAL LLM SETUP (LLAMA.CPP + NATIVE LIBRECHAT + GOOGLE SEARCH)
+# PREDATOR LOCAL LLM SETUP (CACHYOS / FISH / BUN / MONGO)
 # ==============================================================================
 set -uo pipefail
-REAL_USER=${SUDO_USER:-$USER}
+
+REAL_USER="${SUDO_USER:-$USER}"
 USER_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
-status() { echo -e "\n\e[1;35m[AI] $1\e
-status "Downloading DeepSeek-Coder-V2-Lite"
-mkdir -p "$USER_HOME/ai_models"
-sudo -u "$REAL_USER" wget -O "$USER_HOME/ai_models/coder-lite-q4.gguf" \
-    https://huggingface.co/bartowski/DeepSeek-Coder-V2-Lite-Instruct-GGUF/resolve/main/DeepSeek-Coder-V2-Lite-Instruct-Q4_K_M.gguf
+MODEL_DIR="$USER_HOME/ai_models"
 
-# 3. Claude Code Terminal Agent
-status "Installing Anthropic Claude Code"
-sudo -u "$REAL_USER" npm install -g @anthropic-ai/claude-code
-# Point Claude Code to local llama-server (Port 8000)
-echo 'set -gx ANTHROPIC_BASE_URL "http://localhost:8000"' >> "$USER_HOME/.config/fish/conf.d/ai_vars.fish"
-echo 'set -gx ANTHROPIC_AUTH_TOKEN "local"' >> "$USER_HOME/.config/fish/conf.d/ai_vars.fish"
+status() { 
+    echo -e "\n\033[1;32m[AI]\033[0m $1" 
+}
 
-# 4. Native LibreChat Setup (Web Interface with Web Search)
-status "Installing LibreChat Natively"
+# 1. System Dependencies & AUR Helper
+status "Installing CachyOS dependencies..."
+sudo pacman -S --noconfirm base-devel git wget bun cmake python-pip
+
+# Ensure an AUR helper (yay) is installed
+if ! command -v yay &> /dev/null; then
+    status "AUR helper not found. Installing yay..."
+    git clone https://aur.archlinux.org/yay-bin.git /tmp/yay-bin
+    cd /tmp/yay-bin && makepkg -si --noconfirm
+    cd - && rm -rf /tmp/yay-bin
+fi
+
+# 2. MongoDB Installation (AUR)
+status "Installing MongoDB from AUR..."
+sudo -u "$REAL_USER" yay -S --noconfirm mongodb-bin
+
+status "Verifying and Starting MongoDB Service..."
+sudo systemctl daemon-reload
+sudo systemctl enable --now mongodb
+
+if systemctl is-active --quiet mongodb; then
+    echo "✅ MongoDB is running."
+else
+    echo "❌ MongoDB failed to start."
+    exit 1
+fi
+
+# 3. Build Llama.cpp
+status "Building Llama.cpp..."
 cd "$USER_HOME"
-sudo -u "$REAL_USER" git clone https://github.com/danny-avila/LibreChat.git
+if [ ! -d "llama.cpp" ]; then
+    sudo -u "$REAL_USER" git clone https://github.com/ggerganov/llama.cpp
+fi
+cd llama.cpp
+sudo -u "$REAL_USER" cmake -B build -DGGML_NATIVE=ON
+sudo -u "$REAL_USER" cmake --build build --config Release -j "$(nproc)"
+sudo ln -sf "$USER_HOME/llama.cpp/build/bin/llama-server" /usr/local/bin/llama-server
+
+# 4. Model Download (HF-CLI)
+sudo curl -LsSf https://hf.co/cli/install.sh | bash
+
+
+status "Starting download to $MODEL_DIR..."
+hf download bartowski/DeepSeek-Coder-V2-Lite-Instruct-GGUF \
+    DeepSeek-Coder-V2-Lite-Instruct-Q4_K_M.gguf \
+    --local-dir "$MODEL_DIR" --local-dir-use-symlinks False
+
+# 5. Claude Code Agent & Fish Config
+status "Installing Claude Code..."
+sudo bun install -g @anthropic-ai/claude-code
+
+status "Configuring Fish shell variables..."
+FISH_CONF_DIR="$USER_HOME/.config/fish"
+FISH_CONF="$FISH_CONF_DIR/config.fish"
+sudo -u "$REAL_USER" mkdir -p "$FISH_CONF_DIR"
+sudo -u "$REAL_USER" touch "$FISH_CONF"
+
+# Safe append for environment variables
+if ! grep -q "ANTHROPIC_BASE_URL" "$FISH_CONF"; then
+    echo 'set -gx ANTHROPIC_BASE_URL "http://localhost:8000/v1"' | sudo -u "$REAL_USER" tee -a "$FISH_CONF"
+fi
+if ! grep -q "ANTHROPIC_API_KEY" "$FISH_CONF"; then
+    echo 'set -gx ANTHROPIC_API_KEY "local"' | sudo -u "$REAL_USER" tee -a "$FISH_CONF"
+fi
+
+# 6. LibreChat Build
+status "Building LibreChat..."
+cd "$USER_HOME"
+if [ ! -d "LibreChat" ]; then
+    sudo -u "$REAL_USER" git clone https://github.com/danny-avila/LibreChat.git
+fi
 cd LibreChat
-sudo -u "$REAL_USER" npm install
-sudo -u "$REAL_USER" cp.env.example.env
+sudo -u "$REAL_USER" bun install
+status "Linking internal packages..."
+sudo -u "$REAL_USER" bun run build:packages
+status "Final frontend build..."
+sudo -u "$REAL_USER" bun run frontend
+sudo -u "$REAL_USER" cp -n .env.example .env
+sudo -u "$REAL_USER" sed -i 's/SEARCH=.*/SEARCH=false/' .env
 
-# Configure.env for Native Mongo & Google Search API
-sudo -u "$REAL_USER" sed -i 's|MONGO_URI=.*|MONGO_URI=mongodb://127.0.0.1:27017/LibreChat|'.env
-sudo -u "$REAL_USER" tee -a.env <<EOF
-# Local Llama-Server Endpoint
-OLLAMA_BASE_URL=http://127.0.0.1:8000
-# Google Search API Setup
-GOOGLE_SEARCH_API_KEY=YOUR_API_KEY_HERE
-GOOGLE_CSE_ID=YOUR_SEARCH_ENGINE_ID_HERE
-EOF
-
-# Build LibreChat Frontend
-sudo -u "$REAL_USER" npm run build
-
-status "AI Environment Ready!"
-echo "1. Start Llama-Server: llama-server -m ~/ai_models/coder-lite-q4.gguf --port 8000 --n-gpu-layers 99"
-echo "2. Start LibreChat: cd ~/LibreChat && npm run start"
-echo "3. Run 'claude' in terminal to use the agentic assistant."
+status "PREDATOR SETUP COMPLETE"
